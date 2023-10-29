@@ -1,0 +1,7 @@
+/**
+ * @brief 
+ * 
+ */
+enum Error{
+    
+};
