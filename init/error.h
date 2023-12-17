@@ -1,7 +1,0 @@
-/**
- * @brief 
- * 
- */
-enum Error{
-    
-};
