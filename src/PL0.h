@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#define NRW 11		 // 关键字的总数量
+#define NRW 14		 // 关键字的总数量
 #define TXMAX 500	 // length of identifier table
 #define MAXNUMLEN 14 // maximum number of digits in numbers
 #define NSYM                                                                   \
@@ -19,6 +19,10 @@
 
 #define STACKSIZE 1000 // maximum storage
 
+// 没法使用给定汇编言实现，只能用虚拟的代码地址来表征内置函数的地址 by wu
+#define PRINT_ADDR -1
+#define RANDOM_ADDR -2
+#define CALLSTACK_ADDR -3
 enum symtype // 当前读到字符(串的类型)
 {
 	SYM_NULL,		// 空
@@ -41,6 +45,7 @@ enum symtype // 当前读到字符(串的类型)
 	SYM_SEMICOLON,	//;
 	SYM_PERIOD,		//.
 	SYM_BECOMES,	// 赋值号:=
+	SYM_SCOPE,		// 作用域算符'::',by wu
 	SYM_BEGIN,		// 关键字begin
 	SYM_END,		// 关键字end
 	SYM_IF,			// 关键字if
@@ -52,9 +57,20 @@ enum symtype // 当前读到字符(串的类型)
 	SYM_VAR,		// 关键字var
 	SYM_PROCEDURE,	// 关键字procedure
 	// 补充数组的左右括号以及取地址符,by Lin
-	SYM_LEFTBRACKET,
-	SYM_RIGHTBRACKET,
-	SYM_ADDRESS
+	SYM_LEFTBRACKET,  // [
+	SYM_RIGHTBRACKET, // ]
+	SYM_ADDRESS,	  // &
+	// 新增关键字print,random,CALLSTACK,by wu
+	SYM_PRINT,
+	SYM_RANDOM,
+	SYM_CALLSTACK,
+	// 补充行注释符 以及 左右块注释符 by wdy
+	SYM_LINECOMMENT,	   // //
+	SYM_LEFTBLOCKCOMMENT,  // /*
+	SYM_RIGHTBLOCKCOMMENT, // */
+	// 补充左右移运算符
+	SYM_SHL, // <<
+	SYM_SHR	 // >>
 };
 
 enum idtype {
@@ -67,7 +83,7 @@ enum idtype {
 };
 
 // 新增指令，modified by Lin
-enum opcode { LIT, OPR, LOD, STO, CAL, INT, JMP, JPC, STOA, LODA, LEA };
+enum opcode { LIT, OPR, LOD, STO, CAL, INT, JMP, JPC, STOA, LODA, LEA, POP };
 
 enum oprcode {
 	OPR_RET,
@@ -82,7 +98,9 @@ enum oprcode {
 	OPR_LES,
 	OPR_LEQ,
 	OPR_GTR,
-	OPR_GEQ
+	OPR_GEQ,
+	OPR_SHL, // 左移
+	OPR_SHR	 // 右移
 };
 
 typedef struct {
@@ -120,13 +138,16 @@ char *err_msg[] = {
 	/* 23 */ "The symbol can not be followed by a factor.",
 	/* 24 */ "The symbol can not be as the beginning of an expression.",
 	/* 25 */ "The number is too great.",
-	/* 26 */ "",
-	/* 27 */ "",
-	/* 28 */ "",
-	/* 29 */ "",
-	/* 30 */ "",
-	/* 31 */ "",
-	/* 32 */ "There are too many levels."};
+	/* 26 */ "Missing '('",
+	/* 27 */ "Missing ','",
+	/* 28 */ "Incorrect pc",
+	/* 29 */ "Incorrect paramlist",
+	/* 30 */ "variable or procedure expected",
+	/* 31 */ "Nested comments", // 嵌套注释
+	/* 32 */ "There are too many levels.",
+    /* 33 */ "There are too many nested levels of assignment", // 嵌套赋值
+    /* 34 */ "Can not backtrace in assignment"
+    };
 
 //////////////////////////////////////////////////////////////////////
 char ch; // 最后一次读到的字符
@@ -140,7 +161,9 @@ int	 kk;
 int	 err;
 int	 cx; // 指令数组的当前下标，标记最新要生成指令的位置
 int	 level = 0; // 当前层次
-int	 tx	   = 0; // 当前变量表的下标
+int	 start_level =
+	MAXLEVEL; // 搜索符号表时只返回层次小于等于start_level的变量 by wu
+int tx = 0; // 当前变量表的下标
 
 char line[80]; // 当前解析指令行，长度为ll，以空格作为结束标记
 
@@ -150,12 +173,16 @@ char *word
 	[NRW +
 	 1] = // word中记录了各种关键字，预留了word[0]来存储当前变量名(便于语法分析匹配串)
 	{"",  /* place holder */
-	 "begin", "call",	   "const", "do",  "end",  "if",
-	 "odd",	  "procedure", "then",	"var", "while"};
+	 "begin", "call", "const", "do", "end", "if", "odd", "procedure", "then",
+	 "var", "while",
+	 // 新增关键字print,random,CALLSTACK,by wu
+	 "print", "random", "CALLSTACK"};
 
-int wsym[NRW + 1] = {SYM_NULL,		SYM_BEGIN, SYM_CALL, SYM_CONST,
-					 SYM_DO,		SYM_END,   SYM_IF,	 SYM_ODD,
-					 SYM_PROCEDURE, SYM_THEN,  SYM_VAR,	 SYM_WHILE};
+int wsym[NRW + 1] = {SYM_NULL, SYM_BEGIN, SYM_CALL, SYM_CONST, SYM_DO, SYM_END,
+					 SYM_IF, SYM_ODD, SYM_PROCEDURE, SYM_THEN, SYM_VAR,
+					 SYM_WHILE,
+					 // 新增关键字print,random,CALLSTACK,by wu
+					 SYM_PRINT, SYM_RANDOM, SYM_CALLSTACK};
 
 int ssym[NSYM + 1] = {SYM_NULL, SYM_PLUS, SYM_MINUS, SYM_TIMES, SYM_SLASH,
 					  SYM_LPAREN, SYM_RPAREN, SYM_EQU, SYM_COMMA, SYM_PERIOD,
@@ -172,9 +199,9 @@ char csym[NSYM + 1] = {' ', '+', '-', '*', '/', '(', ')', '=', ',', '.', ';',
 // 新增指令LODA,将栈顶指向的值取出来替换掉当前栈顶
 // 新增指令LEA,取变量地址于栈顶
 // modified by Lin
-#define MAXINS 11
+#define MAXINS 12
 char *mnemonic[MAXINS] = {"LIT", "OPR", "LOD",	"STO",	"CAL", "INT",
-						  "JMP", "JPC", "STOA", "LODA", "LEA"};
+						  "JMP", "JPC", "STOA", "LODA", "LEA", "POP"};
 
 typedef struct {
 	char name[MAXIDLEN + 1];

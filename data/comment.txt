@@ -1,0 +1,17 @@
+var i; // wdy comment
+
+/*
+var t;
+var u;*
+var *p; ***
+var **q; //
+var ***r;
+*/
+
+
+/*
+varkjksjk
+/*
+jyuy
+*/
+*/

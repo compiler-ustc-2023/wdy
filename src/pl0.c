@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "PL0.h"
 #include "set.c"
@@ -83,6 +84,10 @@ void getsym(void) {
 		if (ch == '=') {
 			sym = SYM_BECOMES; // :=
 			getch();
+		} else if (ch == ':') // ::, by wu
+		{
+			sym = SYM_SCOPE;
+			getch();
 		} else {
 			sym = SYM_NULL; // illegal?
 		}
@@ -90,6 +95,9 @@ void getsym(void) {
 		getch();
 		if (ch == '=') {
 			sym = SYM_GEQ; // >=
+			getch();
+		} else if (ch == '>') {
+			sym = SYM_SHR; // >> add by wdy
 			getch();
 		} else {
 			sym = SYM_GTR; // >
@@ -99,11 +107,58 @@ void getsym(void) {
 		if (ch == '=') {
 			sym = SYM_LEQ; // <=
 			getch();
+		} else if (ch == '<') {
+			sym = SYM_SHL; // << add by wdy
+			getch();
 		} else if (ch == '>') {
 			sym = SYM_NEQ; // <>
 			getch();
 		} else {
 			sym = SYM_LES; // <
+		}
+	}
+
+	// 这里是处理可能会出现复合运算符的，所以'[' ']' '&'
+	// 不需要在这里处理，会统一在 else 中处理 添加  //  */  /*
+	// 并在此处直接处理注释
+	else if (ch == '/') {
+		getch();
+		if (ch == '/') {
+			sym = SYM_LINECOMMENT; // 行注释
+			// 行尾在本程序中是空格，定义在getch() line[++ll] = ' ';
+			// 但是不能用 ch == ' ' 来判定行结尾，因为中间可能有插入空格
+			// 一旦读完该行，直接返回，不需要做之后的判断
+			// 如何表示读完行？可以参考 SEMICOLON 的处理，获取下一个symbol即可
+			while (cc < ll) { getch(); }
+			getsym();
+			return;
+		} else if (ch == '*') {
+			sym = SYM_LEFTBLOCKCOMMENT;			   // 左块注释
+			while (sym != SYM_RIGHTBLOCKCOMMENT) { // 直到找到右块注释为止
+				while (ch != '*') {
+					if (ch == '/') {
+						getch();
+						if (ch == '*') {
+							error(31); // 不能嵌套注释
+						}
+					} else
+						getch();
+				}
+				getsym();
+			}
+			// 获取下一个 symbol，表示结束注释
+			getsym();
+			return;
+		} else {
+			sym = SYM_SLASH; // 否则就是除号
+		}
+	} else if (ch == '*') {
+		getch();
+		if (ch == '/') {
+			sym = SYM_RIGHTBLOCKCOMMENT; // 右块注释
+			getch();
+		} else {
+			sym = SYM_TIMES; // 否则就是乘号
 		}
 	}
 	// 添加左右方括号，add by Lin
@@ -194,7 +249,7 @@ void enter(int kind, int *dimension, int depth) {
 		mk->depth		 = 0; // 不是指针
 		break;
 
-	// 加入指针和数组case，add by Lin
+		// 加入指针和数组case，add by Lin
 	case ID_POINTER: // 指针，存储和普通变量相同，kind不同
 		mk				 = (mask *)&table[tx];
 		mk->level		 = level;
@@ -223,12 +278,13 @@ void enter(int kind, int *dimension, int depth) {
 
 //////////////////////////////////////////////////////////////////////
 // 在变量表中查找名为id的变量的下标，返回下标i，通过table[i]可以访问变量id的内容
-int position(char *id) {
+int position(char *id, int start_level) {
 	int i;
 	strcpy(table[0].name, id);
 	i = tx + 1;
-	while (strcmp(table[--i].name, id) != 0)
-		;
+	while (strcmp(table[--i].name, id) != 0 ||
+		   ((mask *)&table[i])->level > start_level)
+		; // 如果在不同嵌套深度有同名变量优先搜索到当前嵌套深度的变量
 	return i;
 } // position
 
@@ -318,8 +374,8 @@ void vardeclaration(void) // 往变量表中加入一个变量/数组/指针,mod
 } // vardeclaration
 
 //////////////////////////////////////////////////////////////////////
-void listcode(int from, int to) // 打印指令
-{
+// 打印从from到to的所有指令
+void listcode(int from, int to) {
 	int i;
 
 	printf("\n");
@@ -338,13 +394,13 @@ void factor(symset fsys) // 生成因子
 // 3:若干个* 接变量，取若干次地址
 // 4:若干个*加(表达式),					//计算表达式后取地址
 {
-	void   expression(symset fsys);
-	int	   i;
+	void   shift(symset fsys);
+	int	   i; // 最近读的关键字在变量表中的下标
 	symset set;
 
 	// test(facbegsys, fsys, 24); // The symbol can not be as the beginning of
-	// an expression.
-	while (sym == NULL) // 除去空格
+	// an shift.
+	while (sym == SYM_NULL) // 除去空格
 	{
 		getsym();
 	}
@@ -352,7 +408,7 @@ void factor(symset fsys) // 生成因子
 	// if (inset(sym, facbegsys))			//这个if没必要
 	//{
 	if (sym == SYM_IDENTIFIER) {
-		if ((i = position(id)) == 0) {
+		if ((i = position(id, start_level)) == 0) {
 			error(11); // Undeclared identifier.
 		} else {
 			switch (table[i].kind) {
@@ -372,14 +428,26 @@ void factor(symset fsys) // 生成因子
 				gen(LOD, level - mk->level, mk->address);
 				break;
 			case ID_PROCEDURE:
-				error(21); // Procedure identifier can not be in an expression.
+				getsym();
+				if (sym == SYM_SCOPE) {
+					getsym();
+					if (sym != SYM_IDENTIFIER) error(30);
+					mk = (mask *)&table[i]; // 子函数的符号表表项
+					start_level =
+						mk->level +
+						1; // 子函数本身的层次加一才能索引到子函数中的变量
+					factor(fsys);
+					start_level = MAXLEVEL;
+				}
+				// error(21); // Procedure identifier can not be in an
+				// shift.
 				break;
 			case ID_ARRAY: // 新增读取数组元素,by Lin
 				getsym();
 				mk = (mask *)&table[i];
 				if (sym == SYM_LEFTBRACKET) // 调用了数组元素
 				{
-					while (sym == NULL) // 除去空格
+					while (sym == SYM_NULL) // 除去空格
 					{
 						getsym();
 					}
@@ -391,7 +459,7 @@ void factor(symset fsys) // 生成因子
 							error(52); // 数组不具备该维度
 						} else {
 							getsym();
-							expression(fsys);
+							shift(fsys);
 						}
 						int space = 1; // 当前维度的数组空间
 						for (int j = dim; j < ARRAY_DIM;
@@ -404,8 +472,8 @@ void factor(symset fsys) // 生成因子
 						}
 						gen(LIT, 0, space);
 						gen(OPR, 0, OPR_MUL);
-						gen(OPR, 0, OPR_ADD); // 更新地址
-						while (sym == NULL)	  // 除去空格
+						gen(OPR, 0, OPR_ADD);	// 更新地址
+						while (sym == SYM_NULL) // 除去空格
 						{
 							getsym();
 						}
@@ -420,6 +488,12 @@ void factor(symset fsys) // 生成因子
 				break;
 			} // switch
 		}
+	} else if (sym == SYM_SCOPE) {
+		getsym();
+		if (sym != SYM_IDENTIFIER) error(30);
+		start_level = 0; // 索引到main函数层次中定义的变量
+		factor(fsys);
+		start_level = MAXLEVEL;
 	} else if (sym == SYM_NUMBER) {
 		if (num > MAXADDRESS) {
 			error(25); // The number is too great.
@@ -430,7 +504,7 @@ void factor(symset fsys) // 生成因子
 	} else if (sym == SYM_LPAREN) {
 		getsym();
 		set = uniteset(createset(SYM_RPAREN, SYM_NULL), fsys);
-		expression(set);
+		shift(set);
 		destroyset(set);
 		if (sym == SYM_RPAREN) {
 			getsym();
@@ -451,12 +525,12 @@ void factor(symset fsys) // 生成因子
 	// 新增语法1
 	else if (sym == SYM_ADDRESS) {
 		getsym();
-		while (sym == NULL) // 除去空格
+		while (sym == SYM_NULL) // 除去空格
 		{
 			getsym();
 		}
 		if (sym == SYM_IDENTIFIER) {
-			if ((i = position(id)) == 0) {
+			if ((i = position(id, start_level)) == 0) {
 				error(11); // Undeclared identifier.
 			} else {
 				mask *mk = (mask *)&table[i];
@@ -475,13 +549,13 @@ void factor(symset fsys) // 生成因子
 			depth++;
 			getsym();
 		}
-		while (sym == NULL) // 除去空格
+		while (sym == SYM_NULL) // 除去空格
 		{
 			getsym();
 		}
 		if (sym == SYM_IDENTIFIER) // 多个*接变量
 		{
-			if ((i = position(id)) == 0) {
+			if ((i = position(id, start_level)) == 0) {
 				error(11); // Undeclared identifier.
 			} else {
 				switch (table[i].kind) {
@@ -498,14 +572,14 @@ void factor(symset fsys) // 生成因子
 					break;
 				case ID_PROCEDURE:
 					error(21); // Procedure identifier can not be in an
-							   // expression.
+					// shift.
 					break;
 				case ID_ARRAY: // 新增读取数组元素,by Lin
 					getsym();
 					mk = (mask *)&table[i];
 					if (sym == SYM_LEFTBRACKET) // 调用了数组元素
 					{
-						while (sym == NULL) // 除去空格
+						while (sym == SYM_NULL) // 除去空格
 						{
 							getsym();
 						}
@@ -517,7 +591,7 @@ void factor(symset fsys) // 生成因子
 								error(52); // 数组不具备该维度
 							} else {
 								getsym();
-								expression(fsys);
+								shift(fsys);
 							}
 							int space = 1; // 当前维度的数组空间
 							for (int j = dim; j < ARRAY_DIM;
@@ -530,8 +604,8 @@ void factor(symset fsys) // 生成因子
 							}
 							gen(LIT, 0, space);
 							gen(OPR, 0, OPR_MUL);
-							gen(OPR, 0, OPR_ADD); // 更新地址
-							while (sym == NULL)	  // 除去空格
+							gen(OPR, 0, OPR_ADD);	// 更新地址
+							while (sym == SYM_NULL) // 除去空格
 							{
 								getsym();
 							}
@@ -550,7 +624,7 @@ void factor(symset fsys) // 生成因子
 		{
 			getsym();
 			set = uniteset(createset(SYM_RPAREN, SYM_NULL), fsys);
-			expression(set);
+			shift(set);
 			destroyset(set);
 			if (sym == SYM_RPAREN) {
 				getsym();
@@ -567,14 +641,18 @@ void factor(symset fsys) // 生成因子
 	}
 
 	// 错误检测,新增元素赋值号及右方括号by Lin
-	symset set1 = createset(SYM_BECOMES, SYM_RIGHTBRACKET);
-	fsys		= uniteset(fsys, set1);
-	test(fsys, createset(SYM_LPAREN, SYM_NULL, SYM_LEFTBRACKET, SYM_BECOMES),
+	// 将逗号和右括号补充进follow集 by wu
+	symset set1 =
+		createset(SYM_BECOMES, SYM_RIGHTBRACKET, SYM_COMMA, SYM_RPAREN);
+	fsys = uniteset(fsys, set1);
+	test(fsys,
+		 createset(SYM_LPAREN, SYM_NULL, SYM_LEFTBRACKET, SYM_BECOMES,
+				   SYM_COMMA),
 		 23);
 	//} // if
 } // factor
+///////////////////////////////////////
 
-//////////////////////////////////////////////////////////////////////
 void term(symset fsys) // 生成项
 {
 	int	   mulop;
@@ -596,8 +674,8 @@ void term(symset fsys) // 生成项
 } // term
 
 //////////////////////////////////////////////////////////////////////
-void expression(symset fsys) // 生成表达式
-{
+
+void expression(symset fsys) {
 	int	   addop;
 	symset set;
 
@@ -618,6 +696,23 @@ void expression(symset fsys) // 生成表达式
 	destroyset(set);
 } // expression
 
+void shift(symset fsys) { // 生成移位表达式
+	int	   shiftop;
+	symset set = uniteset(fsys, createset(SYM_SHL, SYM_SHR, SYM_NULL));
+	expression(set);
+	while (sym == SYM_SHL || sym == SYM_SHR) {
+		shiftop = sym;
+		getsym();
+		expression(set);
+		if (shiftop == SYM_SHL) {
+			gen(OPR, 0, OPR_SHL);
+		} else {
+			gen(OPR, 0, OPR_SHR);
+		}
+	}
+	destroyset(set);
+}
+
 //////////////////////////////////////////////////////////////////////
 void condition(symset fsys) // 生成条件表达式
 {
@@ -626,18 +721,18 @@ void condition(symset fsys) // 生成条件表达式
 
 	if (sym == SYM_ODD) {
 		getsym();
-		expression(fsys);
+		shift(fsys);
 		gen(OPR, 0, 6);
 	} else {
 		set = uniteset(relset, fsys);
-		expression(set);
+		shift(set);
 		destroyset(set);
 		if (!inset(sym, relset)) {
 			error(20);
 		} else {
 			relop = sym;
 			getsym();
-			expression(fsys);
+			shift(fsys);
 			switch (relop) {
 			case SYM_EQU:
 				gen(OPR, 0, OPR_EQU);
@@ -662,6 +757,46 @@ void condition(symset fsys) // 生成条件表达式
 	}		  // else
 } // condition
 
+mask *assign_sequence[10];
+int	  curr_assign_index = 0;
+int	  get_assign_num() {
+	  int assign_num = 0;
+	  for (int i = 0; i < ll; i++) {
+		  if (line[i] == ':' && line[i + 1] == '=') { assign_num++; }
+	  }
+	  return assign_num;
+}
+//////////////////////////////////////////////////////////////////////
+void assign_statement(symset fsys) { // 生成赋值语句
+	int i;
+	int assign_num = get_assign_num();
+	if (assign_num >= 10) { error(33); }
+	for (int i = 1; i < assign_num; i++) {
+		if (sym == SYM_IDENTIFIER) {
+			mask *mk;
+			if (!(i = position(id, start_level))) {
+				error(11); // Undeclared identifier.
+			}
+			if (sym == ID_VARIABLE) {
+				mk									 = (mask *)&table[i];
+				assign_sequence[curr_assign_index++] = mk;
+			} else {
+				error(12); // Illegal assignment.
+			}
+			getsym();
+			if (sym == SYM_BECOMES) { getsym(); }
+		} else {
+			error(12);
+		}
+	}
+	// 处理最后一个右值
+	shift(fsys); // 此时栈顶为最后一个表达式的值
+	for (int j = curr_assign_index - 1; j >= 0; j--) {
+		mask* mk = assign_sequence[j];
+		gen(STO, level - mk->level, mk->address);
+	}
+	curr_assign_index = 0;  // 恢复现场，准备处理下一个赋值语句
+}
 //////////////////////////////////////////////////////////////////////
 void statement(symset fsys) // 语句,加入了指针和数组的赋值，modified by Lin
 {
@@ -671,7 +806,7 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 	{						   // variable assignment
 		while (sym == SYM_NULL) getsym();
 		mask *mk;
-		if (!(i = position(id))) {
+		if (!(i = position(id, start_level))) {
 			error(11); // Undeclared identifier.
 		} else if (table[i].kind != ID_VARIABLE && table[i].kind != ID_ARRAY &&
 				   table[i].kind != ID_POINTER) {
@@ -682,8 +817,12 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 		mk = (mask *)&table[i];
 		if (sym == SYM_BECOMES) {
 			getsym();
-			expression(fsys);
-			if (i) { gen(STO, level - mk->level, mk->address); }
+			// shift(fsys);
+			assign_statement(fsys);
+			if (i) { 
+                gen(STO, level - mk->level, mk->address); 
+                gen(POP, 0, 0); // 所有调用结束之后，恢复栈顶
+            }
 		} else if (sym == SYM_LEFTBRACKET) // 调用了数组元素
 		{
 			gen(LEA, level - mk->level, mk->address); // 将数组基地址置于栈顶
@@ -693,7 +832,7 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 					error(52); // 数组不具备该维度
 				} else {
 					getsym();
-					expression(fsys);
+					shift(fsys);
 				}
 				int space = 1; // 当前维度的数组空间
 				for (int j = dim; j < ARRAY_DIM; j++) // 计算当前维的空间
@@ -716,7 +855,7 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 			} else {
 				error(13); // ':=' expected.
 			}
-			expression(fsys);
+			shift(fsys);
 			gen(STOA, level - mk->level, mk->address);
 		} else {
 			error(13); // ':=' expected.
@@ -724,13 +863,13 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 	} else if (sym == SYM_TIMES) // 给指针指向内容赋值，add by Lin
 	{
 		getsym();
-		expression(fsys); // 此时栈顶为一个地址
+		shift(fsys); // 此时栈顶为一个地址
 		if (sym == SYM_BECOMES) {
 			getsym();
 		} else {
 			error(13); // ':=' expected.
 		}
-		expression(fsys); // 栈顶为一个表达式的值
+		shift(fsys); // 栈顶为一个表达式的值
 		gen(STOA, 0, 0);
 	}
 
@@ -739,7 +878,7 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 		if (sym != SYM_IDENTIFIER) {
 			error(14); // There must be an identifier to follow the 'call'.
 		} else {
-			if (!(i = position(id))) {
+			if (!(i = position(id, start_level))) {
 				error(11); // Undeclared identifier.
 			} else if (table[i].kind == ID_PROCEDURE) {
 				mask *mk;
@@ -804,8 +943,68 @@ void statement(symset fsys) // 语句,加入了指针和数组的赋值，modifi
 		statement(fsys);
 		gen(JMP, 0, cx1);
 		code[cx2].a = cx;
+	} else if (sym == SYM_PRINT) // 内置函数 print()的实现 by wu
+	{
+		getsym();
+		if (sym != SYM_LPAREN) {
+			error(26); // 没找到左括号
+		}
+		getsym(); // 跳过左括号
+		if (sym == SYM_RPAREN) {
+			gen(LOD, 0, 0); // 无参数，打印换行符
+			getsym();		// 跳过右括号
+		} else {
+			int param_count = 0;
+			shift(fsys);
+			param_count += 1;
+			while (sym != SYM_RPAREN) {
+				if (sym != SYM_COMMA) {
+					error(27);
+					break;
+				} else {
+					getsym();
+					shift(fsys);
+					param_count += 1;
+				}
+			}
+			getsym();
+			gen(LIT, 0, param_count);
+		}
+		gen(CAL, 0, PRINT_ADDR);
+	} else if (sym == SYM_CALLSTACK) // 内置函数 CALLSTACK的实现 by wu
+	{
+		// TODO
+	} else if (sym == SYM_RANDOM) ////内置函数 random() 的实现 by wu
+	{
+		getsym();
+		if (sym != SYM_LPAREN) {
+			error(26); // 没找到左括号
+		}
+		getsym();
+		if (sym == SYM_RPAREN) {
+			gen(LOD, 0, 0); // 无参数，随机生成 0~100 的自然数
+			getsym();		// 跳过右括号
+		} else {
+			int param_count = 0;
+			shift(fsys);
+			param_count += 1;
+			while (sym != SYM_RPAREN) {
+				if (sym != SYM_COMMA) {
+					error(27);
+					break;
+				} else {
+					getsym();
+					shift(fsys);
+					param_count += 1;
+					while (sym == SYM_NULL) getsym();
+				}
+			}
+			if (param_count > 2) error(29);
+			getsym();
+			gen(LIT, 0, param_count);
+		}
+		gen(CAL, 0, RANDOM_ADDR);
 	}
-
 	// 错误检测
 	test(fsys, phi, 19);
 } // statement
@@ -886,7 +1085,7 @@ void block(symset fsys) // 生成一个程序体
 			block(set); // 生成子程序体
 			destroyset(set1);
 			destroyset(set);
-			tx = savedTx;
+			tx = savedTx; // 子程序分析完后将子程序的变量从符号表中“删除”
 			level--;
 
 			if (sym == SYM_SEMICOLON) {
@@ -926,21 +1125,22 @@ void block(symset fsys) // 生成一个程序体
 } // block
 
 //////////////////////////////////////////////////////////////////////
+// base 沿着控制链回溯 levelDiff 次，返回目的深度父函数的 bp
 int base(int stack[], int currentLevel, int levelDiff) {
 	int b = currentLevel;
 
 	while (levelDiff--) b = stack[b];
 	return b;
-} // base
+}
 
 //////////////////////////////////////////////////////////////////////
 // 执行汇编语言程序
 void interpret() {
 	int			pc; // program counter
-	int			stack[STACKSIZE];
-	int			top; // top of stack
-	int			b;	 // program, base, and top-stack register
-	instruction i;	 // instruction register
+	int			stack[STACKSIZE] = {0};
+	int			top; // top of stack,栈顶寄存器
+	int			b;	 // program, base, and top-stack register, 函数栈bp
+	instruction i;	 // instruction register,指令寄存器
 
 	printf("Begin executing PL/0 program.\n");
 
@@ -948,6 +1148,7 @@ void interpret() {
 	b		 = 1;
 	top		 = 3;
 	stack[1] = stack[2] = stack[3] = 0;
+	int param_num;
 	do {
 		i = code[pc++];
 		switch (i.f) {
@@ -986,6 +1187,15 @@ void interpret() {
 				}
 				stack[top] /= stack[top + 1];
 				break;
+				// add by wdy
+			case OPR_SHL:
+				top--;
+				stack[top] <<= stack[top + 1];
+				break;
+			case OPR_SHR:
+				top--;
+				stack[top] >>= stack[top + 1];
+				break;
 			case OPR_ODD:
 				stack[top] %= 2;
 				break;
@@ -1019,13 +1229,14 @@ void interpret() {
 			stack[++top] = stack[base(stack, b, i.l) + i.a];
 			break;
 
-		// 添加了LODA和SOT和LEA指令，modified by Lin
+			// 添加了LODA和SOT和LEA指令，modified by Lin
 		case LODA:
 			stack[top] = stack[stack[top]];
 			break;
 		case STOA:
 			stack[stack[top - 1]] = stack[top];
 			printf("%d\n", stack[top]);
+			top -= 2;
 			break;
 		case LEA:
 			stack[++top] = base(stack, b, i.l) + i.a;
@@ -1034,15 +1245,59 @@ void interpret() {
 		case STO:
 			stack[base(stack, b, i.l) + i.a] = stack[top];
 			printf("%d\n", stack[top]);
-			top--;
+			// top--;
 			break;
 		case CAL:
-			stack[top + 1] = base(stack, b, i.l);
-			// generate new block mark
-			stack[top + 2] = b;
-			stack[top + 3] = pc;
-			b			   = top + 1;
-			pc			   = i.a;
+			switch (i.a) // 先判断是不是内置函数 by wu
+			{
+			case PRINT_ADDR:
+				param_num = stack[top];
+				printf("system call: print\n");
+				if (param_num == 0) {
+					printf("\n");
+				} else {
+					while (param_num) {
+						printf("%d ", stack[top - param_num]); // 逆序打印
+						param_num -= 1;
+					}
+					printf("\n");
+				}
+				break;
+			case RANDOM_ADDR:
+				printf("system call: random\n");
+				param_num = stack[top];
+				int random_num;
+				if (param_num == 0) {
+					random_num = (int)rand();
+					printf("%d ", random_num);
+				} else if (param_num == 1) {
+					random_num = (int)rand() % stack[top - 1];
+					printf("%d ", random_num);
+				} else if (param_num == 2) {
+					random_num =
+						(int)rand() % (stack[top - 1] - stack[top - 2]) +
+						stack[top - 2];
+					printf("%d ", random_num);
+				}
+				stack[++top] = random_num;
+				printf("\n");
+				break;
+			case CALLSTACK_ADDR:
+				// TODO by wu
+				break;
+			default:
+				if (i.a >= 0) {
+					stack[top + 1] = base(stack, b, i.l); // 访问链
+					// generate new block mark
+					stack[top + 2] = b;	 // 控制链
+					stack[top + 3] = pc; // 返回地址
+					b			   = top + 1;
+					pc			   = i.a;
+				} else {
+					error(28); // 程序地址错误
+				}
+				break;
+			}
 			break;
 		case INT:
 			top += i.a;
@@ -1052,6 +1307,9 @@ void interpret() {
 			break;
 		case JPC:
 			if (stack[top] == 0) pc = i.a;
+			top--;
+			break;
+		case POP:
 			top--;
 			break;
 		} // switch
@@ -1106,7 +1364,8 @@ int main() {
 	if (sym != SYM_PERIOD) error(9); // '.' expected.
 	if (err == 0) {
 		hbin = fopen("hbin.txt", "w");
-		for (i = 0; i < cx; i++) fwrite(&code[i], sizeof(instruction), 1, hbin);
+		for (i = 0; i < cx; i++)
+			fprintf(hbin, "%d %d %d\n", code[i].f, code[i].l, code[i].a);
 		fclose(hbin);
 	}
 	if (err == 0)
@@ -1120,3 +1379,4 @@ int main() {
 
 //////////////////////////////////////////////////////////////////////
 // eof pl0.c
+// print(random(100),random(100),random(20,50));
