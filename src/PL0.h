@@ -145,9 +145,12 @@ char *err_msg[] = {
 	/* 30 */ "variable or procedure expected",
 	/* 31 */ "Nested comments", // 嵌套注释
 	/* 32 */ "There are too many levels.",
-    /* 33 */ "There are too many nested levels of assignment", // 嵌套赋值
-    /* 34 */ "Can not backtrace in assignment"
-    };
+	/* 33 */ "There are too many nested levels of assignment", // 嵌套赋值
+															   /* 34 */
+	"Can not backtrace in assignment",
+	/* 35 */
+	"The number of dereference characters cannot exceed the array dimensions plus depth of elem in array." // 解引用符号个数不能超过数组维度 + 数组元素的指针深度
+};
 
 //////////////////////////////////////////////////////////////////////
 char ch; // 最后一次读到的字符
@@ -225,6 +228,10 @@ typedef struct {
 	int depth; // 指针深度
 } mask; // 变量或函数，和常量共用存储空间，将value的位置用来存储层次level和地址address
 
+typedef struct {
+	mask *array_name;
+	int	  array_depth;
+} type_array, *p_type_array;
 FILE *infile;
 
 // EOF PL0.h
