@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#define NRW 14		 // 关键字的总数量
+#define NRW 17		 // 关键字的总数量
 #define TXMAX 500	 // length of identifier table
 #define MAXNUMLEN 14 // maximum number of digits in numbers
 #define NSYM                                                                   \
@@ -57,20 +57,29 @@ enum symtype // 当前读到字符(串的类型)
 	SYM_VAR,		// 关键字var
 	SYM_PROCEDURE,	// 关键字procedure
 	// 补充数组的左右括号以及取地址符,by Lin
-	SYM_LEFTBRACKET,  // [
-	SYM_RIGHTBRACKET, // ]
-	SYM_ADDRESS,	  // &
+	SYM_LEFTBRACKET,
+	SYM_RIGHTBRACKET,
+	SYM_ADDRESS,
 	// 新增关键字print,random,CALLSTACK,by wu
 	SYM_PRINT,
 	SYM_RANDOM,
 	SYM_CALLSTACK,
-	// 补充行注释符 以及 左右块注释符 by wdy
+	// 新增关键字break,continue, by tian
+	SYM_BREAK,
+	SYM_CONTINUE,
+	// 补充行注释符 by wdy
 	SYM_LINECOMMENT,	   // //
 	SYM_LEFTBLOCKCOMMENT,  // /*
 	SYM_RIGHTBLOCKCOMMENT, // */
 	// 补充左右移运算符
 	SYM_SHL, // <<
-	SYM_SHR	 // >>
+	SYM_SHR, // >>
+	// 补充逻辑运算符, by wy
+	SYM_AND, // &&
+	SYM_OR,	 // ||
+	SYM_NOT, // !
+	// 新增关键字for
+	SYM_FOR // for
 };
 
 enum idtype {
@@ -83,7 +92,23 @@ enum idtype {
 };
 
 // 新增指令，modified by Lin
-enum opcode { LIT, OPR, LOD, STO, CAL, INT, JMP, JPC, STOA, LODA, LEA, POP };
+enum opcode {
+	LIT,
+	OPR,
+	LOD,
+	STO,
+	CAL,
+	INT,
+	JMP,
+	JPC,
+	STOA,
+	LODA,
+	LEA,
+	POP,
+	// 新增指令，by wy
+	JZ,
+	JNZ
+};
 
 enum oprcode {
 	OPR_RET,
@@ -99,8 +124,13 @@ enum oprcode {
 	OPR_LEQ,
 	OPR_GTR,
 	OPR_GEQ,
-	OPR_SHL, // 左移
-	OPR_SHR	 // 右移
+	// 补充左右移运算符 by wdy
+	OPR_SHL,
+	OPR_SHR,
+	// 补充逻辑运算符, by wy
+	OPR_AND,
+	OPR_OR,
+	OPR_NOT
 };
 
 typedef struct {
@@ -132,7 +162,7 @@ char *err_msg[] = {
 	/* 17 */ "';' or 'end' expected.",
 	/* 18 */ "'do' expected.",
 	/* 19 */ "Incorrect symbol.",
-	/* 20 */ "Relative operators expected.",
+	/* 20 */ "Relative operators expected.", // 不需要这个错误提示
 	/* 21 */ "Procedure identifier can not be in an expression.",
 	/* 22 */ "Missing ')'.",
 	/* 23 */ "The symbol can not be followed by a factor.",
@@ -143,13 +173,16 @@ char *err_msg[] = {
 	/* 28 */ "Incorrect pc",
 	/* 29 */ "Incorrect paramlist",
 	/* 30 */ "variable or procedure expected",
-	/* 31 */ "Nested comments", // 嵌套注释
+	/* 31 */ "Nested comments", // 嵌套注释 add by wdy
 	/* 32 */ "There are too many levels.",
-	/* 33 */ "There are too many nested levels of assignment", // 嵌套赋值
-															   /* 34 */
-	"Can not backtrace in assignment",
-	/* 35 */
-	"The number of dereference characters cannot exceed the array dimensions plus depth of elem in array." // 解引用符号个数不能超过数组维度 + 数组元素的指针深度
+	/* 33 */ "break statement not within a loop",
+	/* 34 */ "continue statement not within a loop",
+	/* 35 */ "The procedure name should be followed by ()",		   // add by wy
+	/* 36 */ "Too many parameters",								   // add by wy
+	/* 37 */ "Too few parameters",								   // add by wy
+	/* 38 */ "The parameter is expected but other words appear",   // add by wy
+	/* 39 */ "The procedure loses a parameter or has an extra ','", // add by wy
+    /* 40 */ "The dereference character cannot exceed the array dimension plus the depth of the array element pointer." // 解引用符不能超过数组维度加数组元素指针深度 by wdy
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -170,6 +203,17 @@ int tx = 0; // 当前变量表的下标
 
 char line[80]; // 当前解析指令行，长度为ll，以空格作为结束标记
 
+int sign_logic_and = 0; // 逻辑与的标记，用于逻辑与的短路 by wy
+int sign_logic_or  = 0; // 逻辑或的标记，用于逻辑或的短路 by wy
+int sign_condition = 0; // add by wy
+int cx_logic_and[100], cx_logic_or[100];
+
+int loop_level = 0;
+int break_mark[MAXLEVEL][CXMAX];
+int continue_mark[MAXLEVEL][CXMAX];
+// 当前所处的循环层次
+// 以及break/continue的位置标记，用于break/continue对应的pl0代码的回填 by tian
+
 instruction code[CXMAX];
 
 char *word
@@ -179,13 +223,21 @@ char *word
 	 "begin", "call", "const", "do", "end", "if", "odd", "procedure", "then",
 	 "var", "while",
 	 // 新增关键字print,random,CALLSTACK,by wu
-	 "print", "random", "CALLSTACK"};
+	 "print", "random", "CALLSTACK",
+	 // 新增关键字break,continue by Tian
+	 "break", "continue",
+	 // 新增关键字for, by tq
+	 "for"};
 
 int wsym[NRW + 1] = {SYM_NULL, SYM_BEGIN, SYM_CALL, SYM_CONST, SYM_DO, SYM_END,
 					 SYM_IF, SYM_ODD, SYM_PROCEDURE, SYM_THEN, SYM_VAR,
 					 SYM_WHILE,
 					 // 新增关键字print,random,CALLSTACK,by wu
-					 SYM_PRINT, SYM_RANDOM, SYM_CALLSTACK};
+					 SYM_PRINT, SYM_RANDOM, SYM_CALLSTACK,
+					 // 新增关键字break,continue by Tian
+					 SYM_BREAK, SYM_CONTINUE,
+					 // 新增关键字for, by tq
+					 SYM_FOR};
 
 int ssym[NSYM + 1] = {SYM_NULL, SYM_PLUS, SYM_MINUS, SYM_TIMES, SYM_SLASH,
 					  SYM_LPAREN, SYM_RPAREN, SYM_EQU, SYM_COMMA, SYM_PERIOD,
@@ -202,18 +254,26 @@ char csym[NSYM + 1] = {' ', '+', '-', '*', '/', '(', ')', '=', ',', '.', ';',
 // 新增指令LODA,将栈顶指向的值取出来替换掉当前栈顶
 // 新增指令LEA,取变量地址于栈顶
 // modified by Lin
-#define MAXINS 12
-char *mnemonic[MAXINS] = {"LIT", "OPR", "LOD",	"STO",	"CAL", "INT",
-						  "JMP", "JPC", "STOA", "LODA", "LEA", "POP"};
+#define MAXINS 14
+char *mnemonic[MAXINS] = {"LIT", "OPR", "LOD", "STO",  "CAL",
+						  "INT", "JMP", "JPC", "STOA", "LODA",
+						  "LEA", "POP", "JZ",  "JNZ"}; // 新增JZ,JNZ指令,by wy
+
+// 增加procedure处理, add by wy
+typedef struct {
+	int	 n;
+	int *kind;
+} procedure_params, *ptr2param;
 
 typedef struct {
 	char name[MAXIDLEN + 1];
 	int	 kind;
 	int	 value;
 	// 数组每一维的维度，最高为3维，add by Lin
-	int dimension[3];
-	int depth; // 指针深度
-} comtab;	   // 常量
+	int		  dimension[3];
+	int		  depth;		  // 指针深度
+	ptr2param para_procedure; // 指向参数表的指针, add by wy
+} comtab;					  // 常量
 
 comtab table
 	[TXMAX]; // 变量表,常量包括name，kind和value，变量和函数包括name,kind,level和address
@@ -224,8 +284,9 @@ typedef struct {
 	short level;
 	short address;
 	// 数组每一维的维度，最高为3维，add by Lin
-	int dimension[3];
-	int depth; // 指针深度
+	int		  dimension[3];
+	int		  depth;		  // 指针深度
+	ptr2param para_procedure; // 指向参数表的指针, add by wy
 } mask; // 变量或函数，和常量共用存储空间，将value的位置用来存储层次level和地址address
 
 typedef struct {
